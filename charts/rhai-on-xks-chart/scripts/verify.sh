@@ -4,7 +4,7 @@
 # Environment variables:
 #   RELEASE_NAME     - Helm release name (default: rhai-on-xks)
 #   NAMESPACE        - Helm release namespace (default: rhai-on-xks)
-#   CLOUD_PROVIDER   - Cloud provider: azure or coreweave (default: azure)
+#   CLOUD_PROVIDER   - Cloud provider: azure, coreweave, or aws (default: azure)
 #   TIMEOUT          - Max wait time in seconds per check (default: 300)
 
 set -euo pipefail
@@ -19,11 +19,50 @@ if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
 fi
 INTERVAL=10
 
+declare -A PROVIDER_CRDS=(
+  [azure]="azurekubernetesengines.infrastructure.opendatahub.io"
+  [coreweave]="coreweavekubernetesengines.infrastructure.opendatahub.io"
+  [aws]="awskubernetesengines.infrastructure.opendatahub.io"
+)
+
+declare -A PROVIDER_CR_DISPLAY=(
+  [azure]="AzureKubernetesEngine"
+  [coreweave]="CoreWeaveKubernetesEngine"
+  [aws]="AWSKubernetesEngine"
+)
+
+if [[ -z "${PROVIDER_CRDS[$CLOUD_PROVIDER]+_}" ]]; then
+  echo "ERROR: unsupported CLOUD_PROVIDER '${CLOUD_PROVIDER}'. Valid values: ${!PROVIDER_CRDS[*]}" >&2
+  exit 1
+fi
+
 ERRORS=0
 ERROR_MESSAGES=()
 
 log_ok()   { echo "  OK: $1"; }
 log_fail() { echo "  FAIL: $1"; ERRORS=$((ERRORS + 1)); ERROR_MESSAGES+=("$1"); }
+
+debug_namespace() {
+  local ns="$1"
+  local filter="${2:-}"
+  local filter_args=()
+  if [ -n "${filter}" ]; then
+    filter_args=(-l "${filter}")
+  fi
+  echo "  DEBUG: pods in '${ns}'${filter:+ (filter: ${filter})}:"
+  kubectl get pods -n "${ns}" "${filter_args[@]}" -o wide 2>/dev/null || true
+  for pod in $(kubectl get pods -n "${ns}" "${filter_args[@]}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    local phase
+    phase=$(kubectl get pod "${pod}" -n "${ns}" -o jsonpath='{.status.phase}' 2>/dev/null)
+    echo "  --- pod: ${pod} (${phase}) ---"
+    if [ "${phase}" != "Running" ] && [ "${phase}" != "Succeeded" ]; then
+      echo "  DEBUG: describe pod ${pod}:"
+      kubectl describe pod "${pod}" -n "${ns}" 2>/dev/null || true
+    else
+      kubectl logs "${pod}" -n "${ns}" --tail=50 --all-containers 2>/dev/null || true
+    fi
+  done
+}
 
 wait_for() {
   local description="$1"
@@ -129,10 +168,7 @@ fi
 
 # --- Namespaces ---
 echo "--- Namespaces ---"
-EXPECTED_NAMESPACES=("redhat-ods-operator" "redhat-ods-applications" "${NAMESPACE}")
-if [ "${CLOUD_PROVIDER}" = "azure" ] || [ "${CLOUD_PROVIDER}" = "coreweave" ]; then
-  EXPECTED_NAMESPACES+=("rhai-cloudmanager-system")
-fi
+EXPECTED_NAMESPACES=("redhat-ods-operator" "redhat-ods-applications" "${NAMESPACE}" "rhai-cloudmanager-system")
 
 for ns in "${EXPECTED_NAMESPACES[@]}"; do
   if kubectl get namespace "${ns}" >/dev/null 2>&1; then
@@ -150,55 +186,44 @@ else
   log_fail "CRD 'kserves.components.platform.opendatahub.io' not found"
 fi
 
-if [ "${CLOUD_PROVIDER}" = "azure" ]; then
-  if kubectl get crd azurekubernetesengines.infrastructure.opendatahub.io >/dev/null 2>&1; then
-    log_ok "CRD 'azurekubernetesengines.infrastructure.opendatahub.io' exists"
+for provider in "${!PROVIDER_CRDS[@]}"; do
+  crd="${PROVIDER_CRDS[$provider]}"
+  if [ "${CLOUD_PROVIDER}" = "${provider}" ]; then
+    if kubectl get crd "${crd}" >/dev/null 2>&1; then
+      log_ok "CRD '${crd}' exists"
+    else
+      log_fail "CRD '${crd}' not found"
+    fi
   else
-    log_fail "CRD 'azurekubernetesengines.infrastructure.opendatahub.io' not found"
+    if kubectl get crd "${crd}" >/dev/null 2>&1; then
+      log_fail "CRD '${crd}' should NOT exist for ${CLOUD_PROVIDER} provider"
+    else
+      log_ok "CRD '${crd}' correctly absent"
+    fi
   fi
-  if kubectl get crd coreweavekubernetesengines.infrastructure.opendatahub.io >/dev/null 2>&1; then
-    log_fail "CRD 'coreweavekubernetesengines.infrastructure.opendatahub.io' should NOT exist for azure provider"
-  else
-    log_ok "CRD 'coreweavekubernetesengines.infrastructure.opendatahub.io' correctly absent"
-  fi
-elif [ "${CLOUD_PROVIDER}" = "coreweave" ]; then
-  if kubectl get crd coreweavekubernetesengines.infrastructure.opendatahub.io >/dev/null 2>&1; then
-    log_ok "CRD 'coreweavekubernetesengines.infrastructure.opendatahub.io' exists"
-  else
-    log_fail "CRD 'coreweavekubernetesengines.infrastructure.opendatahub.io' not found"
-  fi
-  if kubectl get crd azurekubernetesengines.infrastructure.opendatahub.io >/dev/null 2>&1; then
-    log_fail "CRD 'azurekubernetesengines.infrastructure.opendatahub.io' should NOT exist for coreweave provider"
-  else
-    log_ok "CRD 'azurekubernetesengines.infrastructure.opendatahub.io' correctly absent"
-  fi
-fi
+done
 
 # --- Step 1: Cloud manager deployment ---
 echo "--- Cloud Manager ---"
 CM_NS="rhai-cloudmanager-system"
-if [ "${CLOUD_PROVIDER}" = "azure" ]; then
-  wait_for_deployment "azure-cloud-manager-operator" "${CM_NS}" 1
-  if kubectl get deployment coreweave-cloud-manager-operator -n "${CM_NS}" >/dev/null 2>&1; then
-    log_fail "Deployment 'coreweave-cloud-manager-operator' should NOT exist for azure provider"
+for provider in "${!PROVIDER_CRDS[@]}"; do
+  deploy="${provider}-cloud-manager-operator"
+  if [ "${CLOUD_PROVIDER}" = "${provider}" ]; then
+    wait_for_deployment "${deploy}" "${CM_NS}" 1
   else
-    log_ok "Deployment 'coreweave-cloud-manager-operator' correctly absent"
+    if kubectl get deployment "${deploy}" -n "${CM_NS}" >/dev/null 2>&1; then
+      log_fail "Deployment '${deploy}' should NOT exist for ${CLOUD_PROVIDER} provider"
+    else
+      log_ok "Deployment '${deploy}' correctly absent"
+    fi
   fi
-elif [ "${CLOUD_PROVIDER}" = "coreweave" ]; then
-  wait_for_deployment "coreweave-cloud-manager-operator" "${CM_NS}" 1
-  if kubectl get deployment azure-cloud-manager-operator -n "${CM_NS}" >/dev/null 2>&1; then
-    log_fail "Deployment 'azure-cloud-manager-operator' should NOT exist for coreweave provider"
-  else
-    log_ok "Deployment 'azure-cloud-manager-operator' correctly absent"
-  fi
-fi
+done
 
 # --- Step 2: Cloud provider CR status ---
 echo "--- Cloud Provider CR ---"
-if [ "${CLOUD_PROVIDER}" = "azure" ]; then
-  wait_for_cr_ready "azurekubernetesengines.infrastructure.opendatahub.io" "default-azurekubernetesengine" "AzureKubernetesEngine 'default-azurekubernetesengine'"
-elif [ "${CLOUD_PROVIDER}" = "coreweave" ]; then
-  wait_for_cr_ready "coreweavekubernetesengines.infrastructure.opendatahub.io" "default-coreweavekubernetesengine" "CoreWeaveKubernetesEngine 'default-coreweavekubernetesengine'"
+cr_name="default-${CLOUD_PROVIDER}kubernetesengine"
+if ! wait_for_cr_ready "${PROVIDER_CRDS[$CLOUD_PROVIDER]}" "${cr_name}" "${PROVIDER_CR_DISPLAY[$CLOUD_PROVIDER]} '${cr_name}'"; then
+  debug_namespace "${CM_NS}"
 fi
 
 # --- Step 3: cert-manager deployments ---
@@ -211,7 +236,10 @@ wait_for_deployment "rhai-operator" "redhat-ods-operator" 3
 
 # --- Step 5: KServe component CR status ---
 echo "--- KServe Component ---"
-wait_for_cr_ready "kserves.components.platform.opendatahub.io" "default-kserve" "Kserve 'default-kserve'"
+if ! wait_for_cr_ready "kserves.components.platform.opendatahub.io" "default-kserve" "Kserve 'default-kserve'"; then
+  debug_namespace "redhat-ods-operator"
+  debug_namespace "redhat-ods-applications" "app.kubernetes.io/part-of=kserve"
+fi
 
 # --- Step 6: Inference Gateway Istio ---
 echo "--- Inference Gateway Istio ---"
