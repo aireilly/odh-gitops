@@ -81,12 +81,6 @@ charts:
 
   rhai-on-xks-chart:
     snapshots:
-      - name: azure-with-related-images
-        setFlags:
-          - azure.enabled=true
-          - rhaiOperator.relatedImages[0].name=RELATED_IMAGE_ODH_KSERVE_LLMISVC_CONTROLLER_IMAGE
-          - rhaiOperator.relatedImages[0].value=ghcr.io/opendatahub-io/kserve/odh-kserve-llmisvc-controller:release-v0.17
-
       - name: with-custom-namespace
         setFlags:
           - azure.enabled=true
@@ -96,19 +90,57 @@ charts:
           - azure.kubernetesEngine.spec.dependencies.lws.configuration.namespace=custom-lws
           - azure.kubernetesEngine.spec.dependencies.sailOperator.configuration.namespace=custom-istio
 
-      - name: coreweave
+      - name: azure-with-related-images
         setFlags:
-          - coreweave.enabled=true
+          - azure.enabled=true
+          - rhaiOperator.relatedImages[0].name=RELATED_IMAGE_ODH_KSERVE_LLMISVC_CONTROLLER_IMAGE
+          - rhaiOperator.relatedImages[0].value=ghcr.io/opendatahub-io/kserve/odh-kserve-llmisvc-controller:release-v0.17
 
       - name: azure-with-pull-secret
         setFlags:
           - azure.enabled=true
           - imagePullSecret.dockerConfigJson=testauth
 
+      - name: azure-with-gateway-hostname
+        setFlags:
+          - azure.enabled=true
+          - gateway.hostname=*.redhat.com
+
+      - name: azure-with-tls-disabled
+        setFlags:
+          - azure.enabled=true
+          - gateway.tls.enabled=false
+
+      - name: azure-with-byo-issuer
+        setFlags:
+          - azure.enabled=true
+          - gateway.hostname=*.example.com
+          - gateway.tls.issuerRef.name=my-letsencrypt-issuer
+          - gateway.tls.additionalSANs[0]=api.example.com
+          - gateway.tls.additionalSANs[1]=a.grpc.example.com
+          - gateway.tls.additionalSANs[2]=admin.example.org
+
+      - name: azure-with-namespaced-issuer
+        setFlags:
+          - azure.enabled=true
+          - gateway.hostname=*.example.com
+          - gateway.tls.issuerRef.kind=Issuer
+          - gateway.tls.issuerRef.name=my-namespaced-issuer
+
+      - name: coreweave
+        setFlags:
+          - coreweave.enabled=true
+
       - name: coreweave-with-pull-secret
         setFlags:
           - coreweave.enabled=true
           - imagePullSecret.dockerConfigJson=testauth
+
+      - name: coreweave-with-allowed-routes-selector
+        setFlags:
+          - coreweave.enabled=true
+          - components.kserve.gateway.allowedRoutes.namespaces.from=Selector
+          - components.kserve.gateway.allowedRoutes.namespaces.selector.matchLabels.inference-gateway-access=enabled
 
       - name: aws
         setFlags:
@@ -128,9 +160,3 @@ charts:
         setFlags:
           - aws.enabled=true
           - components.kserve.gateway.allowedRoutes.namespaces.from=Same
-
-      - name: coreweave-with-allowed-routes-selector
-        setFlags:
-          - coreweave.enabled=true
-          - components.kserve.gateway.allowedRoutes.namespaces.from=Selector
-          - components.kserve.gateway.allowedRoutes.namespaces.selector.matchLabels.inference-gateway-access=enabled
