@@ -98,13 +98,13 @@ Usage:
 {{- define "rhai-on-xks-chart.kubernetesEngineDependencyNamespaces" -}}
 {{- $namespaces := list }}
 {{- $managedOnly := .managedOnly | default false }}
-{{- range $provider := list .root.Values.azure .root.Values.coreweave .root.Values.aws }}
-  {{- if $provider.enabled }}
-    {{- range $depName, $dep := (dig "kubernetesEngine" "spec" "dependencies" (dict) $provider) }}
-      {{- if or (not $managedOnly) (eq (dig "managementPolicy" "" $dep) "Managed") }}
-        {{- with (dig "configuration" "namespace" "" $dep) }}
-          {{- $namespaces = append $namespaces . }}
-        {{- end }}
+{{- $provider := include "rhai-on-xks-chart.activeProvider" .root | fromYaml }}
+{{- if $provider }}
+  {{- $provVals := index $.root.Values (index $provider "name") | default dict }}
+  {{- range $depName, $dep := (dig "kubernetesEngine" "spec" "dependencies" (dict) $provVals) }}
+    {{- if or (not $managedOnly) (eq (dig "managementPolicy" "" $dep) "Managed") }}
+      {{- with (dig "configuration" "namespace" "" $dep) }}
+        {{- $namespaces = append $namespaces . }}
       {{- end }}
     {{- end }}
   {{- end }}
@@ -116,24 +116,30 @@ Usage:
 Return the KubernetesEngine CRD plural resource name for the active cloud provider.
 */}}
 {{- define "rhai-on-xks-chart.keResourceName" -}}
-{{- if and .Values.azure.enabled .Values.azure.kubernetesEngine.enabled -}}azurekubernetesengines
-{{- else if and .Values.coreweave.enabled .Values.coreweave.kubernetesEngine.enabled -}}coreweavekubernetesengines
-{{- else if and .Values.aws.enabled .Values.aws.kubernetesEngine.enabled -}}awskubernetesengines
-{{- end -}}
+{{- $provider := include "rhai-on-xks-chart.activeProvider" . | fromYaml }}
+{{- if and $provider (index $provider "keEnabled") -}}
+  {{- index $provider "keResource" -}}
+{{- end }}
 {{- end -}}
 
 {{/*
 Validate that exactly one cloud provider is enabled.
 */}}
 {{- define "rhai-on-xks-chart.validateCloudProvider" -}}
-{{- if and .Values.enabled (not (or .Values.azure.enabled .Values.coreweave.enabled .Values.aws.enabled)) -}}
-{{- fail "Exactly one cloud provider must be enabled: set azure.enabled=true, coreweave.enabled=true, or aws.enabled=true" -}}
-{{- end -}}
+{{- $registry := include "rhai-on-xks-chart.providerRegistry" . | fromYaml }}
 {{- $enabledCount := 0 -}}
-{{- if .Values.azure.enabled }}{{- $enabledCount = add $enabledCount 1 -}}{{- end -}}
-{{- if .Values.coreweave.enabled }}{{- $enabledCount = add $enabledCount 1 -}}{{- end -}}
-{{- if .Values.aws.enabled }}{{- $enabledCount = add $enabledCount 1 -}}{{- end -}}
+{{- $enabledNames := list -}}
+{{- range $name := keys $registry | sortAlpha }}
+  {{- $providerVals := index $.Values $name | default dict }}
+  {{- if $providerVals.enabled }}
+    {{- $enabledCount = add $enabledCount 1 }}
+    {{- $enabledNames = append $enabledNames $name }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.enabled (eq (int $enabledCount) 0) -}}
+{{- fail (printf "Exactly one cloud provider must be enabled: set %s" (join ".enabled=true, " (keys $registry | sortAlpha) | printf "%s.enabled=true")) -}}
+{{- end -}}
 {{- if and .Values.enabled (gt (int $enabledCount) 1) -}}
-{{- fail "Only one cloud provider can be enabled at a time: set either azure.enabled=true, coreweave.enabled=true, or aws.enabled=true, not multiple" -}}
+{{- fail (printf "Only one cloud provider can be enabled at a time: set either %s, not multiple" (join ".enabled=true, " $enabledNames | printf "%s.enabled=true")) -}}
 {{- end -}}
 {{- end -}}

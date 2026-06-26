@@ -1,11 +1,9 @@
 {{- if .Values.enabled }}
 {{- if .Values.hooks.postInstallCrs.enabled }}
-{{- $createKserve := .Values.components.kserve.enabled }}
-{{- $createAzureKE := and .Values.azure.enabled .Values.azure.kubernetesEngine.enabled }}
-{{- $createCoreweaveKE := and .Values.coreweave.enabled .Values.coreweave.kubernetesEngine.enabled }}
-{{- $createAwsKE := and .Values.aws.enabled .Values.aws.kubernetesEngine.enabled }}
+{{- $componentCRs := include "rhai-on-xks-chart.enabledComponentCRs" . | fromJson }}
+{{- $providerKECR := include "rhai-on-xks-chart.enabledProviderKECR" . }}
 {{- $keResource := include "rhai-on-xks-chart.keResourceName" . }}
-{{- if or $createKserve $createAzureKE $createCoreweaveKE $createAwsKE }}
+{{- if or $componentCRs $providerKECR }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -38,16 +36,21 @@ rules:
       - watch
       - delete
   {{- end }}
-  {{- if $createKserve }}
+  {{- $compRegistry := include "rhai-on-xks-chart.componentCRRegistry" . | fromYaml }}
+  {{- range $name := keys $compRegistry | sortAlpha }}
+    {{- $meta := index $compRegistry $name }}
+    {{- $compVals := index $.Values.components $name | default dict }}
+    {{- if $compVals.enabled }}
   - apiGroups:
-      - components.platform.opendatahub.io
+      - {{ index $meta "apiGroup" }}
     resources:
-      - kserves
+      - {{ index $meta "resource" }}
     verbs:
       - get
       - list
       - watch
       - delete
+    {{- end }}
   {{- end }}
   {{- if $keResource }}
   - apiGroups:
